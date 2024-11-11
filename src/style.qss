@@ -1,0 +1,43 @@
+* {
+    background-color: #0F1013;
+    color: #F9FCFF;
+    font-family: CartographCF;
+    font-size: 16px;
+}
+
+QLabel {
+    background-color: #24272f;
+}
+
+QLabel[text="Info"],
+QLabel[text="Guide"] { 
+    padding: 5px;
+    border: 2px solid #6679C3;
+    margin-bottom: -2px;
+}
+
+    
+/* CUSTOM OBJECTS */
+.Guide {
+    min-width: 640px;
+    min-height: 360px;
+}
+
+.GuideColor {
+    border-radius: 10px;
+    border: 3px solid #FFFFFF;
+}
+
+#GuideLabelsWidget {
+    border: 2px solid #6679C3;
+    background-color: #24272f;
+    padding: 5, 5, 5, 5;
+}
+
+QWidget#PlotWidget,
+QWidget#CameraWidget {
+    border: 2px solid #6679C3;
+    background-color: #24272f;
+}
+
+

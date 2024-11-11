@@ -1,0 +1,683 @@
+#!/usr/bin/python3
+
+import sys
+from scipy.spatial.transform import Rotation as R
+import cv2
+import sys
+import os
+import kzserial
+import serial
+import json
+import cv2
+import threading
+import colorsys
+import time
+from numpy import ndarray
+from math import asin, pi, sqrt
+from ADBVideoCapture import *
+from kzvec import *
+from PyQt5 import QtWidgets, QtGui, QtCore
+from PyQt5.QtGui import QColor
+from PyQt5.QtWidgets import *
+from pyqtgraph import GraphicsLayoutWidget
+import pyqtgraph.opengl as gl
+
+PROGRAM_DIR = os.path.dirname(os.path.abspath(sys.argv[-1]))
+faces = []
+face_cascade = cv2.CascadeClassifier(
+    "./haarcascade_frontalface_default.xml"
+)
+eyes_cascade = cv2.CascadeClassifier(
+    "./haarcascade_eye.xml"
+)
+real_servo_angles = Vec2()
+real_servo_target_angles = Vec2()
+
+# Thread class to handle the camera feed
+class CameraThread(QtCore.QThread):
+    vector_updated = QtCore.pyqtSignal(Vec3, Vec3, Vec2)
+    frame_ready = QtCore.pyqtSignal(ndarray)
+
+    def __init__(self, parent=None, testing=False):
+        super().__init__(parent)
+        # Video capture
+        self.testing = testing
+        self.cap = None
+        self.res_scale = 1
+        if (testing):
+            # Pc camera capture
+            self.cap = cv2.VideoCapture(1)
+        else:
+            # ADB capture
+            self.cap = ADBVideoCapture(False) # USB
+            resolution=[round(800*self.res_scale), round(800*self.res_scale)]
+            self.cap.open(resolution=resolution)
+        self.running = True
+
+
+    def detect_faces(self, frame, scale, verify_eyes=True):
+        global faces
+
+        # Prepare frame
+        small_frame = cv2.resize(frame, (0, 0), fx=1.0/scale, fy=1.0/scale)
+        gray_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+
+        # Detect faces
+        unverified_faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+        if len(unverified_faces) == 0:
+            faces = []
+            return
+
+        # Filter out false positives by checking for eyes in each face region
+        valid_faces = []
+        if verify_eyes:
+            for (x, y, w, h) in unverified_faces:
+                face_region_gray = gray_frame[y:y+h, x:x+w]
+
+                # Detect eyes within the face region
+                eyes = eyes_cascade.detectMultiScale(face_region_gray, scaleFactor=1.1, minNeighbors=5, minSize=(10, 10))
+
+                if len(eyes) > 0:
+                    valid_faces.append((x, y, w, h))
+
+            if len(valid_faces) == 0:
+                faces = []
+                return
+        else:
+            valid_faces = unverified_faces
+
+        # Track which face is target by proximity
+        min_distance = float('inf')
+        new_target_index = 0
+        if len(faces) > 0:
+            x, y, w, h = faces[0]
+            last_target_center = Vec2(x + w / 2, y + h / 2)
+            for i, (x2, y2, w2, h2) in enumerate(valid_faces):
+                new_face_center = Vec2(x2 + w2 / 2, y2 + h2 / 2)
+                distance_from_last_target = distance(new_face_center, last_target_center)
+                if distance_from_last_target < min_distance:
+                    min_distance = distance_from_last_target
+                    new_target_index = i
+            valid_faces[0], valid_faces[new_target_index] = valid_faces[new_target_index], valid_faces[0]
+
+        faces = valid_faces
+
+
+    def run(self):
+        # Some info about the camera
+        # This is not an accurate intepretation
+        # of what physically goes inside of an actual camera
+        # Here I assume that the focal point is behind the sensor
+        # when normally its located at the lens(?)
+        # Either way, this should work well and is more intuitive
+        fov = 60 # degrees
+        sensor_diameter = 6.35 # milimeters
+        sensor_radius = sensor_diameter/2 # milimeters
+        focal_length = sqrt(sensor_diameter**2 + sensor_radius**2) # milimeters
+
+        # Pico and servo related parameters
+        global real_servo_angles
+        update_servo_thread = threading.Thread(target=update_real_servo_angles, args=())
+        update_servo_thread.start()
+        angle_dict = {
+            "servo_x": 0,
+            "servo_y": 0,
+        }
+        half_max_angle = 45
+        available_ports = kzserial.get_serial_ports()
+        rpp = None
+        if available_ports:
+            rpp = serial.Serial(available_ports[-1], timeout=1)
+
+
+
+        # Check if the video stream was opened successfully
+        if not self.cap.isOpened():
+            return
+
+        # Face detection and tracking
+        frame_counter = 0
+        face_detect_thread = threading.Thread(target=self.detect_faces)
+        target_error = Vec2()
+        last_target = (0,0,0,0)
+
+        # Some parameters related to coords
+        # Vector orientation is like this
+        # (0, 0) is in the middle of the frame
+        # Positive x is rightwards
+        # Positive y is upwards
+        # This means positive Z goes towards the viewer
+        # And negative Z goes from the camera to the object
+        # When servo angles are 0,0
+        scale = 1
+        min_distance = round(40*self.res_scale)
+        camera_rect = [round(96*self.res_scale), round(220*self.res_scale), round(736*self.res_scale), round(580*self.res_scale)]
+        camera_radius = round(self.res_scale*640/2)
+        center = Vec2(camera_rect[0] + int((camera_rect[2] - camera_rect[0])/2),
+                              camera_rect[1] + int((camera_rect[3] - camera_rect[1])/2))
+        center_vector=Vec3(0,0,-1)
+        target_vector=Vec3(0,0,-1)
+        target_distance_from_cam = 1
+
+
+        while self.running:
+            ret, frame = self.cap.read()
+            if ret:
+                frame_counter = frame_counter + 1
+
+                # Prepare the frame
+                if not self.testing:
+                    frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                cv2.circle(frame, (center.x, center.y), min_distance, (0,0,255), 2)
+                cv2.circle(frame, (center.x, center.y), 5, (255,0,0), 5)
+
+            # Detect faces in the frame
+            if not face_detect_thread.is_alive():
+                face_detect_thread = threading.Thread(target=self.detect_faces, args=(frame, scale))
+                face_detect_thread.start()
+
+            # Calculate center vector and cam basis
+            center_vector = rotate_by_azimuth_elevation(Vec3(0,0,-focal_length),
+                                                        real_servo_angles.x,
+                                                        real_servo_angles.y)
+            cam_basis_x, cam_basis_y = orthonormal_basis(center_vector)
+            if len(faces) > 0:
+                for (i, (x, y, w, h)) in enumerate(faces):
+                    color = (100, 100, 100)
+                    if i == 0:
+                        color = (0, 255, 0)
+
+                        if (last_target != (x, y, w, h)):
+                            last_target = (x, y, w, h)
+                            # Calculate physical distance (in mm)
+                            target_center = Vec2(round((x+w/2)*scale), round((y+h/2)*scale))
+                            target_distance = target_center-center
+                            relative_distance = target_distance/camera_radius
+                            target_distance_mm = relative_distance * sensor_radius
+
+
+                            # Use the camera basis to calculate the target vector
+                            target_vector = (center_vector +
+                                            cam_basis_x * target_distance_mm.x +
+                                            cam_basis_y * target_distance_mm.y)
+
+                            # Calculate aproximate scale/distance of target from the camera
+                            # based on face size 12 13
+                            relative_width = w/camera_radius
+                            target_distance_from_cam = 2.5 / relative_width
+
+
+                            # Get needed angles to go from center_vector to target_vector
+                            angle_between = azimuth_elevation_between(center_vector, target_vector)
+
+                            # Lerp smooth to end angle
+                            end_angle = real_servo_angles - angle_between * 1
+
+                            cv2.line(frame, (center.x, center.y), (target_center.x, target_center.y), (0,255,0), 2)
+                    cv2.rectangle(frame, (round(x*scale), round(y*scale)), (round(x*scale + w*scale), round(y*scale + h*scale)), color, 2)
+
+                # Servo control
+                if abs(target_distance.y) > min_distance or abs(target_distance.x) > min_distance:
+                    if abs(target_distance.y) > min_distance:
+                        angle_dict["servo_y"] = end_angle.y
+                    if abs(target_distance.x) > min_distance:
+                        angle_dict["servo_x"] = end_angle.x
+
+                    trigger_thread = threading.Thread(target=servo_update_trigger, args=(angle_dict["servo_x"],angle_dict["servo_y"]))
+                    trigger_thread.start()
+            else:
+                target_vector = Vec3(0, 0, 1)
+
+            self.vector_updated.emit(normalize(center_vector)*target_distance_from_cam, normalize(target_vector)*target_distance_from_cam, real_servo_angles)
+
+            # Make sure to send nice values
+            angle_dict["servo_x"] = min(half_max_angle,max(-half_max_angle,angle_dict["servo_x"]))
+            angle_dict["servo_y"] = min(half_max_angle,max(-half_max_angle,angle_dict["servo_y"]))
+
+            # Send the data
+            angle_json = json.dumps(angle_dict)
+            if rpp:
+                rpp.write((angle_json + "\n").encode())
+                pass
+
+            # Emit the frame to the main thread
+            frame = frame[camera_rect[1]:camera_rect[3], camera_rect[0]:camera_rect[2]]
+            frame = cv2.resize(frame, (0, 0), fx=1.0/self.res_scale, fy=1.0/self.res_scale)
+            self.frame_ready.emit(frame)
+
+
+    def stop(self):
+        self.running = False
+        self.wait()  # Ensures the thread has fully stopped before exiting
+
+        if self.cap is not None:
+            self.cap.release()
+
+class GuideColor(QFrame):
+    def __init__(self, color):
+        super(GuideColor, self).__init__()
+        self.setStyleSheet(f"background-color: {color};")
+        self.setFixedSize(20, 20)  # Set the fixed size for a small square box
+        self.setFrameShape(QFrame.StyledPanel)  # Add a border-style shape if needed
+
+
+class Guide(QWidget):
+    def __init__(self):
+        super(Guide, self).__init__()
+
+        # Add labels
+        guide_title = QLabel()
+        guide_title.setText("Guide")
+
+        guide_labels_widget = QWidget()
+        guide_labels_widget.setObjectName("GuideLabelsWidget")
+        guide_labels_layout = QVBoxLayout(guide_labels_widget)
+        guide_labels_layout.setSpacing(15)
+        for color, text in [
+                ("#00FF00", "Target"),
+                ("#FF0000", "Deadzone"),
+                ("#0000FF", "Center"),
+                ("#00FFFF", "Camera FOV"),
+        ]:
+            color_widget = GuideColor(color)
+            label = QLabel()
+            label.setText(text)
+            hbox = QHBoxLayout()
+            hbox.setSpacing(8)
+            hbox.addWidget(color_widget)
+            hbox.addWidget(label)
+            guide_labels_layout.addLayout(hbox)
+
+        guide_vbox = QVBoxLayout()
+        guide_vbox.setSpacing(0)
+        guide_vbox.addStretch()
+        guide_vbox.addWidget(guide_title)
+        guide_vbox.addWidget(guide_labels_widget)
+        guide_vbox.addStretch()
+
+        self.setLayout(guide_vbox)
+
+
+class Info(QWidget):
+    def __init__(self):
+        super(Info, self).__init__()
+
+        # Add labels
+        info_title = QLabel()
+        info_title.setText("Info")
+
+        info_labels_widget = QWidget()
+        info_labels_widget.setObjectName("GuideLabelsWidget")
+        info_labels_layout = QVBoxLayout(info_labels_widget)
+        info_labels_layout.setSpacing(15)
+
+        self.center_label = QLabel()
+        self.center_label.setText(f"Camera pointing towards (0,0,1)")
+        center_hbox = QHBoxLayout()
+        center_hbox.setSpacing(8)
+        center_hbox.addWidget(self.center_label)
+        info_labels_layout.addLayout(center_hbox)
+
+        self.target_label = QLabel()
+        self.target_label.setText(f"No target found")
+        target_hbox = QHBoxLayout()
+        target_hbox.setSpacing(8)
+        target_hbox.addWidget(self.target_label)
+        info_labels_layout.addLayout(target_hbox)
+
+        self.azimuth_label = QLabel()
+        self.azimuth_label.setText(f"Azimuth = 0°")
+        azimuth_hbox = QHBoxLayout()
+        azimuth_hbox.setSpacing(8)
+        azimuth_hbox.addWidget(self.azimuth_label)
+        info_labels_layout.addLayout(azimuth_hbox)
+
+        self.elevation_label = QLabel()
+        self.elevation_label.setText(f"Elevation = 0°")
+        elevation_hbox = QHBoxLayout()
+        elevation_hbox.setSpacing(8)
+        elevation_hbox.addWidget(self.elevation_label)
+        info_labels_layout.addLayout(elevation_hbox)
+
+        info_vbox = QVBoxLayout()
+        info_vbox.setSpacing(0)
+        info_vbox.addStretch()
+        info_vbox.addWidget(info_title)
+        info_vbox.addWidget(info_labels_widget)
+        info_vbox.addStretch()
+
+        self.setLayout(info_vbox)
+
+
+    def update_labels(self, center_vector, target_vector, real_servo_angles):
+        scale = length(target_vector)*10
+        self.center_label.setText(f"Camera is pointing towards {center_vector*scale}")
+        if target_vector.z > 0:
+            self.target_label.setText(f"No target found")
+        else:
+            self.target_label.setText(f"Target is at {target_vector*scale}")
+        self.azimuth_label.setText(f"Azimuth = {-real_servo_angles.x:.2f}°")
+        self.elevation_label.setText(f"Elevation = {-real_servo_angles.y:.2f}°")
+
+# Main application window
+class MainWindow(QtWidgets.QMainWindow):
+    def __init__(self):
+        super(MainWindow, self).__init__()
+
+        # Use local qss
+        self.setStyleSheet(open(PROGRAM_DIR + "/style.qss", "r").read())
+
+        # Set up the main layout
+        self.setWindowTitle("Phone Facial Tracking")
+
+        # Add a grid
+        self.root_grid = QGridLayout()
+        self.root_window = QWidget()
+        self.root_window.setContentsMargins(10,10,10,10)
+        self.root_grid.setSpacing(20)
+        self.root_window.setLayout(self.root_grid)
+        self.setCentralWidget(self.root_window)
+
+        # Camera widget
+        self.camera_widget = QtWidgets.QLabel(self)
+        self.camera_widget.setFixedSize(640, 360)
+        self.camera_widget.setObjectName("CameraWidget")
+
+        # Create the 3D plot widget inside a container (for styling)
+        self.plot_widget = gl.GLViewWidget()
+        self.plot_widget.setFixedSize(636, 356)
+        self.plot_widget.setBackgroundColor((36, 39, 47))  # Set a matching background color
+
+        self.plot_widget_container = QWidget()
+        self.plot_widget_container.setObjectName("PlotWidget")
+        self.plot_layout = QHBoxLayout(self.plot_widget_container)
+        self.plot_layout.setContentsMargins(2, 2, 2, 2)
+        self.plot_layout.addWidget(self.plot_widget)
+
+        # Draw the vectors
+        self.draw_graph()
+
+        # Guide widget
+        self.guide_widget = Guide()
+
+        # Info widget
+        self.info_widget = Info()
+
+        # Set up the layout
+        self.root_grid.addWidget(self.camera_widget, 0, 0)
+        self.root_grid.addWidget(self.plot_widget_container, 1, 0)
+        self.root_grid.addWidget(self.guide_widget, 0, 1)
+        self.root_grid.addWidget(self.info_widget, 1, 1)
+
+        # Initialize the camera thread and connect the signal
+        self.camera_thread = CameraThread()
+        self.camera_thread.frame_ready.connect(self.update_camera)
+        self.camera_thread.vector_updated.connect(self.update_graph)
+        self.camera_thread.vector_updated.connect(self.info_widget.update_labels)
+        self.camera_thread.start()
+
+    def update_camera(self, frame):
+        # Convert the image to RGB format
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Convert the image to QImage
+        h, w, ch = frame.shape
+        bytes_per_line = ch * w
+        qt_image = QtGui.QImage(frame.data, w, h, bytes_per_line, QtGui.QImage.Format_RGB888)
+        # Set the pixmap on the label
+        self.camera_widget.setPixmap(QtGui.QPixmap.fromImage(qt_image))
+
+
+    def generate_box_mesh(self, size, center):
+        sx, sy, sz = size[0] / 2, size[1] / 2, size[2] / 2
+        cx, cy, cz = center
+        vertices = [
+            [cx - sx, cy - sy, cz - sz],  # Bottom face
+            [cx + sx, cy - sy, cz - sz],
+            [cx + sx, cy + sy, cz - sz],
+            [cx - sx, cy + sy, cz - sz],
+            [cx - sx, cy - sy, cz + sz],  # Top face
+            [cx + sx, cy - sy, cz + sz],
+            [cx + sx, cy + sy, cz + sz],
+            [cx - sx, cy + sy, cz + sz]
+        ]
+
+        # Create a mesh item for the box
+        mesh_data = gl.MeshData(vertexes=vertices, faces=self.box_faces)
+        return vertices, mesh_data
+
+
+    def draw_graph(self):
+        # Faces for boxes
+        self.box_faces = [
+            [0, 1, 2], [0, 2, 3],  # Bottom face
+            [4, 5, 6], [4, 6, 7],  # Top face
+            [0, 1, 5], [0, 4, 5],  # Side faces
+            [1, 2, 6], [1, 5, 6],
+            [2, 3, 7], [2, 6, 7],
+            [3, 0, 4], [3, 7, 4]
+        ]
+
+        # Draw axis
+                                                             # I'm so sorry
+        self.axisx = gl.GLLinePlotItem(pos=[[0, 0, 0], [0, 1, 0]], color=(1, 0, 0, 0.5), width=2, antialias=True)
+        self.axisy = gl.GLLinePlotItem(pos=[[0, 0, 0], [0, 0, 1]], color=(0, 1, 0, 0.5), width=2, antialias=True)
+        self.axisz = gl.GLLinePlotItem(pos=[[0, 0, 0], [1, 0, 0]], color=(0, 0, 1, 0.5), width=2, antialias=True)
+
+        # Create two lines for the vectors
+        self.line1 = gl.GLLinePlotItem(pos=[[0, 0, 0], [0, 0, 0]], color=(0, 0, 1, 1), width=3, antialias=True)
+        self.line2 = gl.GLLinePlotItem(pos=[[0, 0, 0], [0, 0, 0]], color=(0, 1, 0, 1), width=2, antialias=True)
+        self.target = gl.GLScatterPlotItem(pos=[[-1, 0, 0]], color=(0, 1, 0, 0.3), size=30)
+        self.target.setGLOptions('translucent')
+
+        # Draw fov
+        self.fov_vertices = [
+            [0,0,0],
+            [-1,0.577,0.325],
+            [-1,-0.577,0.325],
+            [-1,-0.577,-0.325],
+            [-1,0.577,-0.325],
+        ]
+        # Faces for fov mesh
+        self.fov_faces = [
+            [0,1,2],
+            [0,2,3],
+            [0,3,4],
+            [0,4,1],
+        ]
+        mesh_data = gl.MeshData(vertexes=self.fov_vertices, faces=self.fov_faces)
+        self.fov_mesh = gl.GLMeshItem(meshdata=mesh_data, color=(0, 1, 1, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 1, 1, 1))
+        self.fov_mesh.setGLOptions('translucent')
+
+        # Draw face
+        size = [0.4,1.4,1.4]
+        center = [-1,0,0]
+        self.face_box_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.face_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 1, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 1, 0, 1))
+        self.face_box.setGLOptions('translucent')
+
+        # Draw base
+        size = [0.9,1.8,0.55]
+        center = [0,-0.25,-1.1]
+        vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.base_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.base_box.setGLOptions('translucent')
+
+        # Draw stick
+        size = [0.25,1.3,0.01]
+        center = [0,-0.5,-0.65]
+        self.stick_box_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.stick_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.stick_box.setGLOptions('translucent')
+
+        # Draw servo
+        size = [0.25,0.7,0.7]
+        center = [0,-0.8,-0.29]
+        self.servo_box_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.servo_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.servo_box.setGLOptions('translucent')
+
+        # Draw phone
+        size = [0.1,1.6,0.7]
+        center = [0, 0.55,-0.24]
+        self.phone_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.phone_box = gl.GLMeshItem(meshdata=mesh_data, color=(1, 1, 1, 0.3), smooth=False, drawEdges=True, edgeColor=(1, 1, 1, 1))
+        self.phone_box.setGLOptions('translucent')
+        self.camera = gl.GLScatterPlotItem(pos=[[0, 0, 0]], color=(0, 0, 0, 1), size=9)
+        self.camera.setGLOptions('translucent')
+
+        # Draw pivots
+        size = [0.1,0.1,0.25]
+        center = [0, 0, -0.79]
+        self.pivotx_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.pivotx_box = gl.GLMeshItem(meshdata=mesh_data, color=(1, 0.5, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.pivotx_box.setGLOptions('translucent')
+        size = [0.1,0.25,0.1]
+        center = [0, -0.39, 0]
+        self.pivoty_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.pivoty_box = gl.GLMeshItem(meshdata=mesh_data, color=(1, 0.5, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.pivoty_box.setGLOptions('translucent')
+
+
+        # Add items to the plot widget
+        self.plot_widget.addItem(self.axisx)
+        self.plot_widget.addItem(self.axisy)
+        self.plot_widget.addItem(self.axisz)
+        self.plot_widget.addItem(self.line1)
+        self.plot_widget.addItem(self.line2)
+        self.plot_widget.addItem(self.camera)
+        self.plot_widget.addItem(self.base_box)
+        self.plot_widget.addItem(self.stick_box)
+        self.plot_widget.addItem(self.servo_box)
+        self.plot_widget.addItem(self.phone_box)
+        self.plot_widget.addItem(self.pivotx_box)
+        self.plot_widget.addItem(self.pivoty_box)
+        #self.plot_widget.addItem(self.target)
+        self.plot_widget.addItem(self.face_box)
+        self.plot_widget.addItem(self.fov_mesh)
+
+
+    def update_graph(self, center_vector, target_vector, real_servo_angles):
+        # Update the positions of the items in the 3D plot
+        has_target = True
+        if target_vector.z > 0:
+            has_target = False
+
+        scale = length(target_vector)
+        target_vector_list = [target_vector.z, target_vector.x, target_vector.y]
+        center_vector_list = [center_vector.z, center_vector.x, center_vector.y]
+        azimuth = real_servo_angles.x
+        elevation = real_servo_angles.y
+
+        # Meshes rotating around pivot of servo_x
+        rotated_vertices = []
+        for vertex in self.stick_box_vertices:
+            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, 0)
+            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
+        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
+        self.stick_box.setMeshData(meshdata=mesh_data)
+
+        rotated_vertices = []
+        for vertex in self.servo_box_vertices:
+            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, 0)
+            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
+        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
+        self.servo_box.setMeshData(meshdata=mesh_data)
+
+        rotated_vertices = []
+        for vertex in self.pivotx_vertices:
+            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, 0)
+            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
+        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
+        self.pivotx_box.setMeshData(meshdata=mesh_data)
+
+        # Meshes rotating around pivot of servo_x and servo_y
+        rotated_vertices = []
+        for vertex in self.fov_vertices:
+            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, elevation) * scale
+            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
+        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.fov_faces)
+        self.fov_mesh.setMeshData(meshdata=mesh_data)
+
+        rotated_vertices = []
+        for vertex in self.face_box_vertices:
+            if has_target:
+                vec_vertex = Vec3(vertex[1], vertex[2], vertex[0]+1)
+                vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, elevation)
+                rotated_vertices.append([vec_vertex.z + target_vector_list[0],
+                                         vec_vertex.x + target_vector_list[1],
+                                         vec_vertex.y + target_vector_list[2]])
+            else:
+                rotated_vertices.append([0,0,0])
+        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
+        self.face_box.setMeshData(meshdata=mesh_data)
+
+        rotated_vertices = []
+        for vertex in self.pivoty_vertices:
+            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, elevation)
+            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
+        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
+        self.pivoty_box.setMeshData(meshdata=mesh_data)
+
+        rotated_vertices = []
+        for vertex in self.phone_vertices:
+            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, elevation)
+            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
+        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
+        self.phone_box.setMeshData(meshdata=mesh_data)
+
+        self.line1.setData(pos=[[0, 0, 0], center_vector_list])
+        if has_target:
+            self.line2.setData(pos=[[0, 0, 0], target_vector_list])
+        else:
+            self.line2.setData(pos=[[0, 0, 0], [0,0,0]])
+        self.target.setData(pos=[target_vector_list])
+
+
+    def closeEvent(self, event):
+        # Stop the camera thread and release resources
+        try:
+            self.camera_thread.stop()
+            self.camera_thread.wait()
+            self.camera_thread.cap.close()
+        except:
+            pass
+        event.accept()
+        QtWidgets.QApplication.quit()
+
+
+def servo_update_trigger(x, y, camera_delay=0.32):
+    global real_servo_target_angles
+    time.sleep(camera_delay)
+    real_servo_target_angles = Vec2(x,y)
+
+
+def update_real_servo_angles():
+    half_max_angle = 45
+    global real_servo_angles, real_servo_target_angles
+    angles_per_frame = 3
+
+    while True:
+        real_servo_angles.x += min(angles_per_frame,max(-angles_per_frame, real_servo_target_angles.x - real_servo_angles.x))
+        real_servo_angles.y += min(angles_per_frame,max(-angles_per_frame, real_servo_target_angles.y - real_servo_angles.y))
+        real_servo_angles.x = min(half_max_angle,max(-half_max_angle,real_servo_angles.x))
+        real_servo_angles.y = min(half_max_angle,max(-half_max_angle,real_servo_angles.y))
+        time.sleep(0.033)
+
+
+# Main function to run the application
+if __name__ == '__main__':
+    if not check_adb_connection():
+        print("No ADB connection available")
+        sys.exit(1)
+    app = QtWidgets.QApplication(sys.argv)
+    main_win = MainWindow()
+    main_win.show()
+    sys.exit(app.exec_())
+
