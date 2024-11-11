@@ -205,7 +205,7 @@ class CameraThread(QtCore.QThread):
                             # Calculate aproximate scale/distance of target from the camera
                             # based on face size 12 13
                             relative_width = w/camera_radius
-                            target_distance_from_cam = 2.5 / relative_width
+                            target_distance_from_cam = 2 / relative_width
 
 
                             # Get needed angles to go from center_vector to target_vector
@@ -273,7 +273,7 @@ class Guide(QWidget):
         guide_labels_widget = QWidget()
         guide_labels_widget.setObjectName("GuideLabelsWidget")
         guide_labels_layout = QVBoxLayout(guide_labels_widget)
-        guide_labels_layout.setSpacing(15)
+        guide_labels_layout.setSpacing(8)
         for color, text in [
                 ("#00FF00", "Target"),
                 ("#FF0000", "Deadzone"),
@@ -291,10 +291,8 @@ class Guide(QWidget):
 
         guide_vbox = QVBoxLayout()
         guide_vbox.setSpacing(0)
-        guide_vbox.addStretch()
         guide_vbox.addWidget(guide_title)
         guide_vbox.addWidget(guide_labels_widget)
-        guide_vbox.addStretch()
 
         self.setLayout(guide_vbox)
 
@@ -308,9 +306,9 @@ class Info(QWidget):
         info_title.setText("Info")
 
         info_labels_widget = QWidget()
-        info_labels_widget.setObjectName("GuideLabelsWidget")
+        info_labels_widget.setObjectName("InfoLabelsWidget")
         info_labels_layout = QVBoxLayout(info_labels_widget)
-        info_labels_layout.setSpacing(15)
+        info_labels_layout.setSpacing(8)
 
         self.center_label = QLabel()
         self.center_label.setText(f"Camera pointing towards (0,0,1)")
@@ -342,10 +340,8 @@ class Info(QWidget):
 
         info_vbox = QVBoxLayout()
         info_vbox.setSpacing(0)
-        info_vbox.addStretch()
         info_vbox.addWidget(info_title)
         info_vbox.addWidget(info_labels_widget)
-        info_vbox.addStretch()
 
         self.setLayout(info_vbox)
 
@@ -386,7 +382,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Create the 3D plot widget inside a container (for styling)
         self.plot_widget = gl.GLViewWidget()
-        self.plot_widget.setFixedSize(636, 356)
+        self.plot_widget.setFixedSize(1286, 600)
         self.plot_widget.setBackgroundColor((36, 39, 47))  # Set a matching background color
 
         self.plot_widget_container = QWidget()
@@ -405,10 +401,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.info_widget = Info()
 
         # Set up the layout
-        self.root_grid.addWidget(self.camera_widget, 0, 0)
-        self.root_grid.addWidget(self.plot_widget_container, 1, 0)
-        self.root_grid.addWidget(self.guide_widget, 0, 1)
-        self.root_grid.addWidget(self.info_widget, 1, 1)
+        self.root_grid.addWidget(self.camera_widget, 0, 0, 2, 1)
+        self.root_grid.addWidget(self.guide_widget, 0, 1, 1, 1)
+        self.root_grid.addWidget(self.info_widget, 1, 1, 1, 1)
+        self.root_grid.addWidget(self.plot_widget_container, 2, 0, 1, 2)
 
         # Initialize the camera thread and connect the signal
         self.camera_thread = CameraThread()
@@ -459,7 +455,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
 
         # Draw axis
-                                                             # I'm so sorry
+                                                                      # I'm so sorry
         self.axisx = gl.GLLinePlotItem(pos=[[0, 0, 0], [0, 1, 0]], color=(1, 0, 0, 0.5), width=2, antialias=True)
         self.axisy = gl.GLLinePlotItem(pos=[[0, 0, 0], [0, 0, 1]], color=(0, 1, 0, 0.5), width=2, antialias=True)
         self.axisz = gl.GLLinePlotItem(pos=[[0, 0, 0], [1, 0, 0]], color=(0, 0, 1, 0.5), width=2, antialias=True)
