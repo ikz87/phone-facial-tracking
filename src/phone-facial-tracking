@@ -15,13 +15,14 @@ import time
 from numpy import ndarray
 from math import asin, pi, sqrt
 from ADBVideoCapture import *
-from kzvec import *
+from vector_swizzling import *
 from PyQt5 import QtWidgets, QtGui, QtCore
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import *
 from pyqtgraph import GraphicsLayoutWidget
 import pyqtgraph.opengl as gl
 
+testing = True
 PROGRAM_DIR = os.path.dirname(os.path.abspath(sys.argv[-1]))
 faces = []
 face_cascade = cv2.CascadeClassifier(
@@ -30,16 +31,17 @@ face_cascade = cv2.CascadeClassifier(
 eyes_cascade = cv2.CascadeClassifier(
     "./haarcascade_eye.xml"
 )
-real_servo_angles = Vec2()
-real_servo_target_angles = Vec2()
+real_servo_angles = SVec2(0,0)
+real_servo_target_angles = SVec2(0,0)
 
 # Thread class to handle the camera feed
 class CameraThread(QtCore.QThread):
-    vector_updated = QtCore.pyqtSignal(Vec3, Vec3, Vec2)
+    vector_updated = QtCore.pyqtSignal(SVec3, SVec3, SVec2)
     frame_ready = QtCore.pyqtSignal(ndarray)
 
-    def __init__(self, parent=None, testing=False):
+    def __init__(self, parent=None):
         super().__init__(parent)
+        global testing
         # Video capture
         self.testing = testing
         self.cap = None
@@ -63,7 +65,7 @@ class CameraThread(QtCore.QThread):
         gray_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
         # Detect faces
-        unverified_faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.5, minNeighbors=5, minSize=(30, 30))
+        unverified_faces = face_cascade.detectMultiScale(gray_frame, scaleFactor=1.3, minNeighbors=5, minSize=(30, 30))
 
         if len(unverified_faces) == 0:
             faces = []
@@ -92,9 +94,9 @@ class CameraThread(QtCore.QThread):
         new_target_index = 0
         if len(faces) > 0:
             x, y, w, h = faces[0]
-            last_target_center = Vec2(x + w / 2, y + h / 2)
+            last_target_center = SVec2(x + w / 2, y + h / 2)
             for i, (x2, y2, w2, h2) in enumerate(valid_faces):
-                new_face_center = Vec2(x2 + w2 / 2, y2 + h2 / 2)
+                new_face_center = SVec2(x2 + w2 / 2, y2 + h2 / 2)
                 distance_from_last_target = distance(new_face_center, last_target_center)
                 if distance_from_last_target < min_distance:
                     min_distance = distance_from_last_target
@@ -139,11 +141,11 @@ class CameraThread(QtCore.QThread):
         # Face detection and tracking
         frame_counter = 0
         face_detect_thread = threading.Thread(target=self.detect_faces)
-        target_error = Vec2()
+        target_error = SVec2(0,0)
         last_target = (0,0,0,0)
 
         # Some parameters related to coords
-        # Vector orientation is like this
+        # SVector orientation is like this
         # (0, 0) is in the middle of the frame
         # Positive x is rightwards
         # Positive y is upwards
@@ -152,12 +154,11 @@ class CameraThread(QtCore.QThread):
         # When servo angles are 0,0
         scale = 1
         min_distance = round(40*self.res_scale)
-        camera_rect = [round(96*self.res_scale), round(220*self.res_scale), round(736*self.res_scale), round(580*self.res_scale)]
+        camera_rect = SVec4(round(96*self.res_scale), round(220*self.res_scale), round(736*self.res_scale), round(580*self.res_scale))
         camera_radius = round(self.res_scale*640/2)
-        center = Vec2(camera_rect[0] + int((camera_rect[2] - camera_rect[0])/2),
-                              camera_rect[1] + int((camera_rect[3] - camera_rect[1])/2))
-        center_vector=Vec3(0,0,-1)
-        target_vector=Vec3(0,0,-1)
+        center = camera_rect.xy + camera_rect.zw // 2
+        center_vector=SVec3(0,0,-1)
+        target_vector=SVec3(0,0,-1)
         target_distance_from_cam = 1
 
 
@@ -178,10 +179,9 @@ class CameraThread(QtCore.QThread):
                 face_detect_thread.start()
 
             # Calculate center vector and cam basis
-            center_vector = rotate_by_azimuth_elevation(Vec3(0,0,-focal_length),
-                                                        real_servo_angles.x,
-                                                        real_servo_angles.y)
-            cam_basis_x, cam_basis_y = orthonormal_basis(center_vector)
+            center_vector = srotate_x(SVec3(0,0,-focal_length), real_servo_angles.y)
+            center_vector = srotate_y(center_vector, real_servo_angles.x)
+            _, cam_basis_x, cam_basis_y = sorthonormal_basis(center_vector)
             if len(faces) > 0:
                 for (i, (x, y, w, h)) in enumerate(faces):
                     color = (100, 100, 100)
@@ -191,7 +191,7 @@ class CameraThread(QtCore.QThread):
                         if (last_target != (x, y, w, h)):
                             last_target = (x, y, w, h)
                             # Calculate physical distance (in mm)
-                            target_center = Vec2(round((x+w/2)*scale), round((y+h/2)*scale))
+                            target_center = SVec2(round((x+w/2)*scale), round((y+h/2)*scale))
                             target_distance = target_center-center
                             relative_distance = target_distance/camera_radius
                             target_distance_mm = relative_distance * sensor_radius
@@ -204,15 +204,14 @@ class CameraThread(QtCore.QThread):
 
                             # Calculate aproximate scale/distance of target from the camera
                             # based on face size 12 13
-                            relative_width = w/camera_radius
-                            target_distance_from_cam = 2 / relative_width
-
+                            relative_width = float(w/camera_radius)
+                            target_distance_from_cam = 2.0 / relative_width
 
                             # Get needed angles to go from center_vector to target_vector
-                            angle_between = azimuth_elevation_between(center_vector, target_vector)
+                            angle_between = SVec2(sazimuth_elevation_between(center_vector, target_vector))
 
                             # Lerp smooth to end angle
-                            end_angle = real_servo_angles - angle_between * 1
+                            end_angle = real_servo_angles + angle_between * 1
 
                             cv2.line(frame, (center.x, center.y), (target_center.x, target_center.y), (0,255,0), 2)
                     cv2.rectangle(frame, (round(x*scale), round(y*scale)), (round(x*scale + w*scale), round(y*scale + h*scale)), color, 2)
@@ -220,16 +219,16 @@ class CameraThread(QtCore.QThread):
                 # Servo control
                 if abs(target_distance.y) > min_distance or abs(target_distance.x) > min_distance:
                     if abs(target_distance.y) > min_distance:
-                        angle_dict["servo_y"] = end_angle.y
+                        angle_dict["servo_y"] = math.degrees(end_angle.y)
                     if abs(target_distance.x) > min_distance:
-                        angle_dict["servo_x"] = end_angle.x
+                        angle_dict["servo_x"] = math.degrees(end_angle.x)
 
                     trigger_thread = threading.Thread(target=servo_update_trigger, args=(angle_dict["servo_x"],angle_dict["servo_y"]))
                     trigger_thread.start()
             else:
-                target_vector = Vec3(0, 0, 1)
+                target_vector = SVec3(0, 0, 1)
 
-            self.vector_updated.emit(normalize(center_vector)*target_distance_from_cam, normalize(target_vector)*target_distance_from_cam, real_servo_angles)
+            self.vector_updated.emit(snormalize(center_vector)*target_distance_from_cam, snormalize(target_vector)*target_distance_from_cam, real_servo_angles)
 
             # Make sure to send nice values
             angle_dict["servo_x"] = min(half_max_angle,max(-half_max_angle,angle_dict["servo_x"]))
@@ -242,8 +241,8 @@ class CameraThread(QtCore.QThread):
                 pass
 
             # Emit the frame to the main thread
-            frame = frame[camera_rect[1]:camera_rect[3], camera_rect[0]:camera_rect[2]]
-            frame = cv2.resize(frame, (0, 0), fx=1.0/self.res_scale, fy=1.0/self.res_scale)
+            frame = frame[camera_rect.x:camera_rect.w, camera_rect.y:camera_rect.z]
+            #frame = cv2.resize(frame, (0, 0), fx=1.0/self.res_scale, fy=1.0/self.res_scale)
             self.frame_ready.emit(frame)
 
 
@@ -347,7 +346,7 @@ class Info(QWidget):
 
 
     def update_labels(self, center_vector, target_vector, real_servo_angles):
-        scale = length(target_vector)*10
+        scale = slength(target_vector)*10
         self.center_label.setText(f"Camera is pointing towards {center_vector*scale}")
         if target_vector.z > 0:
             self.target_label.setText(f"No target found")
@@ -523,12 +522,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.camera.setGLOptions('translucent')
 
         # Draw pivots
-        size = [0.1,0.1,0.25]
+        size = [0.05,0.05,0.25]
         center = [0, 0, -0.79]
         self.pivotx_vertices, mesh_data = self.generate_box_mesh(size, center)
         self.pivotx_box = gl.GLMeshItem(meshdata=mesh_data, color=(1, 0.5, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
         self.pivotx_box.setGLOptions('translucent')
-        size = [0.1,0.25,0.1]
+        size = [0.05,0.25,0.05]
         center = [0, -0.39, 0]
         self.pivoty_vertices, mesh_data = self.generate_box_mesh(size, center)
         self.pivoty_box = gl.GLMeshItem(meshdata=mesh_data, color=(1, 0.5, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
@@ -559,54 +558,44 @@ class MainWindow(QtWidgets.QMainWindow):
         if target_vector.z > 0:
             has_target = False
 
-        scale = length(target_vector)
-        target_vector_list = [target_vector.z, target_vector.x, target_vector.y]
-        center_vector_list = [center_vector.z, center_vector.x, center_vector.y]
+        scale = slength(target_vector)
+        target_vector_list = target_vector.zxy.toList()
+        center_vector_list = center_vector.zxy.toList()
         azimuth = real_servo_angles.x
         elevation = real_servo_angles.y
 
         # Meshes rotating around pivot of servo_x
-        rotated_vertices = []
-        for vertex in self.stick_box_vertices:
-            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
-            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, 0)
-            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
-        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
-        self.stick_box.setMeshData(meshdata=mesh_data)
+        for mesh_vertices, mesh in [(self.stick_box_vertices, self.stick_box),
+                                    (self.servo_box_vertices, self.servo_box),
+                                    (self.pivotx_vertices, self.pivotx_box)]:
+            rotated_vertices = []
+            for vertex in mesh_vertices:
+                vec_vertex = SVec3(vertex[1], vertex[2], vertex[0])
+                vec_vertex = srotate_y(vec_vertex, azimuth)
+                rotated_vertices.append(vec_vertex.zxy.toList())
+            mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
+            mesh.setMeshData(meshdata=mesh_data)
 
-        rotated_vertices = []
-        for vertex in self.servo_box_vertices:
-            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
-            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, 0)
-            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
-        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
-        self.servo_box.setMeshData(meshdata=mesh_data)
-
-        rotated_vertices = []
-        for vertex in self.pivotx_vertices:
-            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
-            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, 0)
-            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
-        mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
-        self.pivotx_box.setMeshData(meshdata=mesh_data)
 
         # Meshes rotating around pivot of servo_x and servo_y
         rotated_vertices = []
         for vertex in self.fov_vertices:
-            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
-            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, elevation) * scale
-            rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
+            vec_vertex = SVec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = srotate_x(vec_vertex, elevation)
+            print(vec_vertex)
+            vec_vertex = srotate_y(vec_vertex, azimuth)*scale
+            print(vec_vertex)
+            rotated_vertices.append(vec_vertex.zxy.toList())
         mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.fov_faces)
         self.fov_mesh.setMeshData(meshdata=mesh_data)
 
         rotated_vertices = []
         for vertex in self.face_box_vertices:
             if has_target:
-                vec_vertex = Vec3(vertex[1], vertex[2], vertex[0]+1)
-                vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, elevation)
-                rotated_vertices.append([vec_vertex.z + target_vector_list[0],
-                                         vec_vertex.x + target_vector_list[1],
-                                         vec_vertex.y + target_vector_list[2]])
+                vec_vertex = SVec3(vertex[1], vertex[2], vertex[0]+1)
+                vec_vertex = srotate_x(vec_vertex, elevation)
+                vec_vertex = srotate_y(vec_vertex, azimuth)
+                rotated_vertices.append((vec_vertex + target_vector).zxy.toList())
             else:
                 rotated_vertices.append([0,0,0])
         mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
@@ -614,16 +603,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
         rotated_vertices = []
         for vertex in self.pivoty_vertices:
-            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
-            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, elevation)
+            vec_vertex = SVec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = srotate_x(vec_vertex, elevation)
+            vec_vertex = srotate_y(vec_vertex, azimuth)
             rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
         mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
         self.pivoty_box.setMeshData(meshdata=mesh_data)
 
         rotated_vertices = []
         for vertex in self.phone_vertices:
-            vec_vertex = Vec3(vertex[1], vertex[2], vertex[0])
-            vec_vertex = rotate_by_azimuth_elevation(vec_vertex, azimuth, elevation)
+            vec_vertex = SVec3(vertex[1], vertex[2], vertex[0])
+            vec_vertex = srotate_x(vec_vertex, elevation)
+            vec_vertex = srotate_y(vec_vertex, azimuth)
             rotated_vertices.append([vec_vertex.z, vec_vertex.x, vec_vertex.y])
         mesh_data = gl.MeshData(vertexes=rotated_vertices, faces=self.box_faces)
         self.phone_box.setMeshData(meshdata=mesh_data)
@@ -651,13 +642,13 @@ class MainWindow(QtWidgets.QMainWindow):
 def servo_update_trigger(x, y, camera_delay=0.32):
     global real_servo_target_angles
     time.sleep(camera_delay)
-    real_servo_target_angles = Vec2(x,y)
+    real_servo_target_angles = SVec2(x,y)
 
 
 def update_real_servo_angles():
-    half_max_angle = 45
+    half_max_angle = math.pi / 4
     global real_servo_angles, real_servo_target_angles
-    angles_per_frame = 3
+    angles_per_frame = half_max_angle / 15
 
     while True:
         real_servo_angles.x += min(angles_per_frame,max(-angles_per_frame, real_servo_target_angles.x - real_servo_angles.x))
@@ -669,7 +660,7 @@ def update_real_servo_angles():
 
 # Main function to run the application
 if __name__ == '__main__':
-    if not check_adb_connection():
+    if not check_adb_connection() and not testing:
         print("No ADB connection available")
         sys.exit(1)
     app = QtWidgets.QApplication(sys.argv)
