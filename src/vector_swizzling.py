@@ -177,28 +177,25 @@ def snormalize(a: SVec):
     normalized_vec = copy.copy(a)
     return normalized_vec/length
 
-def distance(a: SVec, b: SVec):
+def sdistance(a: SVec, b: SVec):
     return slength(a - b)
 
-def projection(a: SVec, b: SVec):
+def sprojection(a: SVec, b: SVec):
     return b * sdot(a, b) / sdot(b, b)
+
+def sangle_between(a: SVec, b: SVec):
+    if slength(a) * slength(b) == 0:
+        return 0
+    a = snormalize(a)
+    b = snormalize(b)
+    dot = sdot(a, b)
+    angle = math.acos(min(1, max(-1, dot)))
+    return angle
 
 
 # 2D vector functions
 def sangle(a: SVec2):
     return math.atan2(a.y, a.x)
-
-def sangle_between(a: SVec2, b: SVec2):
-    if slength(a) * slength(b) == 0:
-        return 0
-    a = snormalize(a)
-    b = snormalize(b)
-    dot_prod = sdot(a, b)
-    cross_prod = a.x * b.y - a.y * b.x
-    angle = math.acos(min(1, max(-1, dot_prod / (slength(a) * slength(b)))))
-    if cross_prod < 0:
-        angle = -angle
-    return angle
 
 def srotate(a: SVec2, angle: Union[float,int]):
     c = math.cos(angle)
