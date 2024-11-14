@@ -74,7 +74,7 @@ class CameraThread(QtCore.QThread):
         gray_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
         # Detect targets
-        unverified_targets = cascade.detectMultiScale(gray_frame, scaleFactor=1.4, minNeighbors=5, minSize=(30, 30))
+        unverified_targets = cascade.detectMultiScale(gray_frame, scaleFactor=1.3, minNeighbors=5, minSize=(30, 30))
 
         if len(unverified_targets) == 0:
             targets = []
@@ -128,6 +128,7 @@ class CameraThread(QtCore.QThread):
 
         # Pico and servo related parameters
         global real_servo_angles
+        global sim_paused
         update_servo_thread = threading.Thread(target=update_real_servo_angles, args=())
         update_servo_thread.start()
         angle_dict = {
@@ -170,17 +171,20 @@ class CameraThread(QtCore.QThread):
 
         while self.running:
             ret, frame = self.cap.read()
-            if ret:
-                frame_counter = frame_counter + 1
 
-                # Prepare the frame
-                if not self.testing:
-                    frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                cv2.circle(frame, (center.x, center.y), min_distance, (255,255,255), 2)
-                cv2.circle(frame, (center.x, center.y), 4, (255,0,255), 5)
+            if not ret:
+                raise Exception("Error reading frame from device")
+            if sim_paused:
+                frame[:] = 0
+            frame_counter = frame_counter + 1
+            # Prepare the frame
+            if not self.testing:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            cv2.circle(frame, (center.x, center.y), min_distance, (255,255,255), 2)
+            cv2.circle(frame, (center.x, center.y), 4, (255,0,255), 5)
 
             # Detect targets in the frame
-            if not target_detect_thread.is_alive():
+            if not target_detect_thread.is_alive() and not sim_paused:
                 target_detect_thread = threading.Thread(target=self.detect_targets, args=(frame, scale))
                 target_detect_thread.start()
 
@@ -194,7 +198,7 @@ class CameraThread(QtCore.QThread):
                     if i == 0:
                         color = (0, 255, 255)
 
-                        if (last_target != (x, y, w, h)):
+                        if last_target != (x, y, w, h) or sim_paused:
                             last_target = (x, y, w, h)
                             # Calculate physical distance (in mm)
                             target_center = SVec2(round((x+w/2)*scale), round((y+h/2)*scale))
@@ -231,7 +235,7 @@ class CameraThread(QtCore.QThread):
                     cv2.rectangle(frame, (round(x*scale), round(y*scale)), (round(x*scale + w*scale), round(y*scale + h*scale)), color, 2)
 
                 # Servo control
-                if abs(target_distance.y) > min_distance or abs(target_distance.x) > min_distance:
+                if not sim_paused and (abs(target_distance.y) > min_distance or abs(target_distance.x) > min_distance):
                     if abs(target_distance.y) > min_distance:
                         angle_dict["servo_y"] = math.degrees(end_angle.y)
                     if abs(target_distance.x) > min_distance:
@@ -254,7 +258,7 @@ class CameraThread(QtCore.QThread):
 
             # Send the data
             angle_json = json.dumps(angle_dict)
-            if rpp:
+            if rpp and not sim_paused:
                 rpp.write((angle_json + "\n").encode())
                 pass
 
@@ -509,8 +513,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fov_mesh.setGLOptions('translucent')
 
         # Draw target
-        size = [0.4,1.4,1.4]
-        center = [-1.35,0,0]
+        size = [0.01,1.4,1.4]
+        center = [-1,0,0]
         self.target_box_vertices, mesh_data = self.generate_box_mesh(size, center)
         self.target_box = gl.GLMeshItem(meshdata=mesh_data, color=(1, 1, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(1, 1, 0, 1))
         self.target_box.setGLOptions('translucent')
@@ -580,9 +584,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
     def update_graph(self, center_vector, target_vector, real_servo_angles):
-        global sim_paused
-        if sim_paused:
-            return
         # This code is kinda redundant but its cleaner
         # to have it here
         _, cam_basis_x, cam_basis_y = sorthonormal_basis(center_vector)
@@ -593,7 +594,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if target_vector.z > 0:
             has_target = False
 
-        scale = slength(target_vector)
+        scale = slength(center_vector)
         azimuth = real_servo_angles.x
         elevation = real_servo_angles.y
 
