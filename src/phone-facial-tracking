@@ -31,6 +31,9 @@ face_cascade = cv2.CascadeClassifier(
 body_cascade = cv2.CascadeClassifier(
     PROGRAM_DIR + "/haarcascade_fullbody.xml"
 )
+upperbody_cascade = cv2.CascadeClassifier(
+    PROGRAM_DIR + "/haarcascade_upperbody.xml"
+)
 eyes_cascade = cv2.CascadeClassifier(
     PROGRAM_DIR + "/haarcascade_eye.xml"
 )
@@ -39,7 +42,7 @@ real_servo_angles = SVec2(0,0)
 real_servo_target_angles = SVec2(0,0)
 sim_paused = False
 
-testing = False
+testing = True
 if len(sys.argv) > 1:
     testing = sys.argv[1]
 
@@ -74,7 +77,7 @@ class CameraThread(QtCore.QThread):
         gray_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
         # Detect targets
-        unverified_targets = cascade.detectMultiScale(gray_frame, scaleFactor=1.3, minNeighbors=5, minSize=(30, 30))
+        unverified_targets = cascade.detectMultiScale(gray_frame, scaleFactor=1.3, minNeighbors=6, minSize=(30, 30))
 
         if len(unverified_targets) == 0:
             targets = []
@@ -86,9 +89,9 @@ class CameraThread(QtCore.QThread):
             for (x, y, w, h) in unverified_targets:
                 target_region_gray = gray_frame[y:y+h, x:x+w]
 
-                double_targets = double_pass.detectMultiScale(target_region_gray, scaleFactor=1.1, minNeighbors=5, minSize=(10, 10))
+                double_targets = double_pass.detectMultiScale(target_region_gray, scaleFactor=1.3, minNeighbors=2, minSize=(10, 10))
 
-                if len(eyes) > 0:
+                if len(double_targets) > 0:
                     valid_targets.append((x, y, w, h))
 
             if len(valid_targets) == 0:
@@ -132,7 +135,7 @@ class CameraThread(QtCore.QThread):
         update_servo_thread = threading.Thread(target=update_real_servo_angles, args=())
         update_servo_thread.start()
         angle_dict = {
-            "servo_x": 0,
+            "servo_x": -5,
             "servo_y": 0,
         }
         available_ports = kzserial.get_serial_ports()
@@ -169,6 +172,8 @@ class CameraThread(QtCore.QThread):
         target_vector=SVec3(0,0,-1)
         target_distance_from_cam = 1
 
+        angle_json = json.dumps(angle_dict)
+        last_json = None
         while self.running:
             ret, frame = self.cap.read()
 
@@ -239,7 +244,7 @@ class CameraThread(QtCore.QThread):
                     if abs(target_distance.y) > min_distance:
                         angle_dict["servo_y"] = math.degrees(end_angle.y)
                     if abs(target_distance.x) > min_distance:
-                        angle_dict["servo_x"] = math.degrees(end_angle.x)
+                        angle_dict["servo_x"] = math.degrees(end_angle.x) - 5 # Oops, servo isn't properly centered
 
                     trigger_thread = threading.Thread(target=servo_update_trigger, args=(end_angle,))
                     trigger_thread.start()
@@ -258,8 +263,9 @@ class CameraThread(QtCore.QThread):
 
             # Send the data
             angle_json = json.dumps(angle_dict)
-            if rpp and not sim_paused:
+            if rpp and not sim_paused and angle_json != last_json:
                 rpp.write((angle_json + "\n").encode())
+                last_json = angle_json
                 pass
 
             # Emit the frame to the main thread

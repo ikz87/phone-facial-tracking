@@ -19,6 +19,7 @@ def main():
         rpp = serial.Serial(available_ports[-1], timeout=1)
 
     step = 5
+    angle_json = json.dumps(angle_dict)
     while True:
         try:
             # Check if arrow keys are pressed
@@ -34,11 +35,13 @@ def main():
             # Make sure to send nice values
             angle_dict["servo_x"] = min(half_max_angle,max(-half_max_angle,angle_dict["servo_x"]))
             angle_dict["servo_y"] = min(half_max_angle,max(-half_max_angle,angle_dict["servo_y"]))
-            print(angle_dict)
 
             # Send the data
+            last_json = angle_json
             angle_json = json.dumps(angle_dict)
-            rpp.write((angle_json + "\n").encode())
+            if last_json!= angle_json:
+                print(f"Sending: {angle_json}")
+                rpp.write((angle_json + "\n").encode())
 
             # Exit the loop if 'Esc' is pressed
             if keyboard.is_pressed("esc"):
