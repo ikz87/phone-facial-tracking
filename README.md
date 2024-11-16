@@ -4,7 +4,7 @@ UNI project for my "Control Systems" course.
 The project works like the following:
 - The program gets the phone screen (meant to be in the camera app) and passes it to opencv using [ADBVideoCapture](https://github.com/alexroat/opencv-adbvideocapture)
 - Faces are detected using a frontal face cascade
-- Actual physical distance from the projection of the target to the camera sensor to its center is calculated
+- Actual physical distance from the projection of the target to the camera sensor to the sensor's center is calculated
 - Some lineal algebra sorcery is performed to get both the center vector (camera -> forwards) and the target vector (camera->target)
 - Azimuth and elevation between those two vectors is calculated and then passed to an rpp as a json trhough serial port communication
 - the rpp moves the servos
