@@ -42,7 +42,7 @@ real_servo_angles = SVec2(0,0)
 real_servo_target_angles = SVec2(0,0)
 sim_paused = False
 
-testing = True
+testing = False
 if len(sys.argv) > 1:
     testing = sys.argv[1]
 
@@ -532,19 +532,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self.base_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
         self.base_box.setGLOptions('translucent')
 
+        # Draw servo x
+        size = [0.25,0.5,0.14]
+        center = [0,0.15,-0.8]
+        vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.servox_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.servox_box.setGLOptions('translucent')
+
+        # Draw support
+        size = [0.8,0.25,0.16]
+        center = [0,-0.3,-0.74]
+        vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.support_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.support_box.setGLOptions('translucent')
+
         # Draw stick
         size = [0.25,1.3,0.01]
         center = [0,-0.5,-0.65]
-        self.stick_box_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.stick_vertices, mesh_data = self.generate_box_mesh(size, center)
         self.stick_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
         self.stick_box.setGLOptions('translucent')
 
-        # Draw servo
-        size = [0.25,0.7,0.7]
-        center = [0,-0.8,-0.29]
-        self.servo_box_vertices, mesh_data = self.generate_box_mesh(size, center)
-        self.servo_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
-        self.servo_box.setGLOptions('translucent')
+        # Draw platform
+        size = [0.75,0.75,0.01]
+        center = [0,0,-0.65]
+        self.platform_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.platform_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.platform_box.setGLOptions('translucent')
+
+        # Draw plat support
+        size = [0.75,0.25,0.07]
+        center = [0,0.2,-0.7]
+        self.platsupport_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.platsupport_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.platsupport_box.setGLOptions('translucent')
+
+        # Draw servo platform
+        size = [0.25,0.7,0.32]
+        center = [0,-0.8,-0.48]
+        self.servplat_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.servplat_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.servplat_box.setGLOptions('translucent')
+
+        # Draw servo y
+        size = [0.25,0.45,0.38]
+        center = [0,-0.55,-0.12]
+        self.servoy_box_vertices, mesh_data = self.generate_box_mesh(size, center)
+        self.servoy_box = gl.GLMeshItem(meshdata=mesh_data, color=(0, 0, 0, 0.3), smooth=False, drawEdges=True, edgeColor=(0, 0, 0, 1))
+        self.servoy_box.setGLOptions('translucent')
 
         # Draw phone
         size = [0.1,1.6,0.7]
@@ -574,8 +609,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.plot_widget.addItem(self.axisz)
         self.plot_widget.addItem(self.camera)
         self.plot_widget.addItem(self.base_box)
+        self.plot_widget.addItem(self.servox_box)
+        self.plot_widget.addItem(self.support_box)
         self.plot_widget.addItem(self.stick_box)
-        self.plot_widget.addItem(self.servo_box)
+        self.plot_widget.addItem(self.platform_box)
+        self.plot_widget.addItem(self.platsupport_box)
+        self.plot_widget.addItem(self.servoy_box)
+        self.plot_widget.addItem(self.servplat_box)
         self.plot_widget.addItem(self.phone_box)
         self.plot_widget.addItem(self.pivotx_box)
         self.plot_widget.addItem(self.pivoty_box)
@@ -605,9 +645,13 @@ class MainWindow(QtWidgets.QMainWindow):
         elevation = real_servo_angles.y
 
         # Meshes rotating around pivot of servo_x
-        for mesh_vertices, mesh in [(self.stick_box_vertices, self.stick_box),
-                                    (self.servo_box_vertices, self.servo_box),
-                                    (self.pivotx_vertices, self.pivotx_box)]:
+        for mesh_vertices, mesh in [(self.stick_vertices, self.stick_box),
+                                    (self.servoy_box_vertices, self.servoy_box),
+                                    (self.pivotx_vertices, self.pivotx_box),
+                                    (self.platform_vertices, self.platform_box),
+                                    (self.platsupport_vertices, self.platsupport_box),
+                                    (self.servplat_vertices, self.servplat_box),
+                                    ]:
             rotated_vertices = []
             for vertex in mesh_vertices:
                 vec_vertex = SVec3(vertex[1], vertex[2], vertex[0])
